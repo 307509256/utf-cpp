@@ -60,6 +60,13 @@ inline bool is_surrogate(uint32_t const cp) throw()
     return min_surrogate <= cp && cp <= max_surrogate;
 }
 
+// Supported combinations:
+//   0xxx_xxxx
+//   110x_xxxx 10xx_xxxx
+//   1110_xxxx 10xx_xxxx 10xx_xxxx
+//   1111_0xxx 10xx_xxxx 10xx_xxxx 10xx_xxxx
+//   1111_10xx 10xx_xxxx 10xx_xxxx 10xx_xxxx 10xx_xxxx
+//   1111_110x 10xx_xxxx 10xx_xxxx 10xx_xxxx 10xx_xxxx 10xx_xxxx
 struct utf8 final
 {
     static size_t const max_unicode_symbol_size = 4;
@@ -74,22 +81,12 @@ struct utf8 final
     static size_t sizech(It & it, NextFn && next_fn)
     {
         uint8_t const chf = *it++;
-        if (chf < 0x80)
-            return 1;
-        else if (chf < 0xC0)
-            throw std::runtime_error("Unexpected UTF8 slave symbol at master position");
-        else if (next_fn(it), chf < 0xE0)
-            return 2;
-        else if (next_fn(it), chf < 0xF0)
-            return 3;
-        else if (next_fn(it), chf < 0xF8)
-            return 4;
-        else if (next_fn(it), chf < 0xFC)
-            return 5;
-        else if (next_fn(it), chf < 0xFE)
-            return 6;
-        else
-            throw std::runtime_error("Invalid UTF8 master symbol");
+        auto const slave_size = slave_sizes[chf];
+        if (slave_size == invalid_slave_size)
+            throw std::runtime_error("Unexpected UTF8 master symbol");
+        for (auto n = slave_size; n-- > 0;)
+            next_fn(it);
+        return slave_size + 1;
     }
 
     template<
@@ -98,46 +95,20 @@ struct utf8 final
     static uint32_t read(It & it, VerifyFn && verify_fn)
     {
         uint8_t const chf = *it++;
-        if (chf < 0x80)      // 0xxx_xxxx
+        auto slave_size = slave_sizes[chf];
+        if (!slave_size)
             return chf;
-        else if (chf < 0xC0)
-            throw std::runtime_error("Unexpected UTF8 slave symbol at master position");
-        uint32_t cp;
-        size_t extra;
-        if (chf < 0xE0)      // 110x_xxxx 10xx_xxxx
-        {
-            cp = chf & 0x1F;
-            extra = 1;
-        }
-        else if (chf < 0xF0) // 1110_xxxx 10xx_xxxx 10xx_xxxx
-        {
-            cp = chf & 0x0F;
-            extra = 2;
-        }
-        else if (chf < 0xF8) // 1111_0xxx 10xx_xxxx 10xx_xxxx 10xx_xxxx
-        {
-            cp = chf & 0x07;
-            extra = 3;
-        }
-        else if (chf < 0xFC) // 1111_10xx 10xx_xxxx 10xx_xxxx 10xx_xxxx 10xx_xxxx
-        {
-            cp = chf & 0x03;
-            extra = 4;
-        }
-        else if (chf < 0xFE) // 1111_110x 10xx_xxxx 10xx_xxxx 10xx_xxxx 10xx_xxxx 10xx_xxxx
-        {
-            cp = chf & 0x01;
-            extra = 5;
-        }
-        else
-            throw std::runtime_error("Invalid UTF8 master symbol");
-        while (extra-- > 0)
+        if (slave_size == invalid_slave_size)
+            throw std::runtime_error("Unexpected UTF8 master symbol");
+        uint32_t cp = chf & first_master_mask[chf];
+        while (slave_size-- > 0)
         {
             verify_fn(it);
             uint8_t const chn = *it++;
             if (chn < 0x80 || 0xC0 <= chn)
                 throw std::runtime_error("Invalid UTF8 slave symbol");
-            cp = (cp << 6) | (chn & 0x3F);
+            cp <<= 6;
+            cp |= (chn & 0x3F);
         }
         return cp;
     }
@@ -186,7 +157,58 @@ struct utf8 final
         else
             throw std::runtime_error("Unsupported UTF8 code point");
     }
+
+private:
+    static uint8_t const invalid_slave_size = 0xFF;
+    static uint8_t const slave_sizes[256];
+    static uint8_t const first_master_mask[256];
 };
+
+#define X invalid_slave_size
+uint8_t const utf8::slave_sizes[256] =
+{
+    //      00 01 02 03 04 05 06 07 08 09 0A 0B 0C 0D 0E 0F
+    /* 00 */ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    /* 10 */ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    /* 20 */ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    /* 30 */ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    /* 40 */ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    /* 50 */ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    /* 60 */ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    /* 70 */ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    /* 80 */ X, X, X, X, X, X, X, X, X, X, X, X, X, X, X, X,
+    /* 90 */ X, X, X, X, X, X, X, X, X, X, X, X, X, X, X, X,
+    /* A0 */ X, X, X, X, X, X, X, X, X, X, X, X, X, X, X, X,
+    /* B0 */ X, X, X, X, X, X, X, X, X, X, X, X, X, X, X, X,
+    /* C0 */ 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+    /* D0 */ 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+    /* E0 */ 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
+    /* F0 */ 3, 3, 3, 3, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, X, X,
+};
+#undef X
+
+#define XXXX 0x00
+uint8_t const utf8::first_master_mask[256] =
+{
+    //        00    01    02    03    04    05    06    07    08    09    0A    0B    0C    0D    0E    0F
+    /* 00 */ XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX,
+    /* 10 */ XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX,
+    /* 20 */ XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX,
+    /* 30 */ XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX,
+    /* 40 */ XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX,
+    /* 50 */ XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX,
+    /* 60 */ XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX,
+    /* 70 */ XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX,
+    /* 80 */ XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX,
+    /* 90 */ XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX,
+    /* A0 */ XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX,
+    /* B0 */ XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX, XXXX,
+    /* C0 */ 0x1F, 0x1F, 0x1F, 0x1F, 0x1F, 0x1F, 0x1F, 0x1F, 0x1F, 0x1F, 0x1F, 0x1F, 0x1F, 0x1F, 0x1F, 0x1F,
+    /* D0 */ 0x1F, 0x1F, 0x1F, 0x1F, 0x1F, 0x1F, 0x1F, 0x1F, 0x1F, 0x1F, 0x1F, 0x1F, 0x1F, 0x1F, 0x1F, 0x1F,
+    /* E0 */ 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F,
+    /* F0 */ 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x03, 0x03, 0x03, 0x03, 0x01, 0x01, XXXX, XXXX,
+};
+#undef XXXX
 
 struct utf16 final
 {
